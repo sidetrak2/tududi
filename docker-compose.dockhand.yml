@@ -1,0 +1,83 @@
+# tududi for Dockhand (Stacks → From Git), deployed to the Mac Mini through Hawser.
+#
+# Reads no .env file: set these in the stack's "Environment variables" in Dockhand.
+#
+#   TUDUDI_USER_EMAIL       admin account email
+#   TUDUDI_USER_PASSWORD    admin account password
+#   TUDUDI_SESSION_SECRET   keep the same value, or everyone is signed out and
+#                           calendar feeds and webhook secrets can no longer be read
+#   DB_PASSWORD             PostgreSQL password; letters and digits only (it goes into a URL)
+#
+# Data stays where the hand-run stack kept it on the Mac:
+#   PostgreSQL     the existing Docker volume tududi_tududi_pgdata
+#   uploads        /Users/lemonnier/docker/hawser-stacks/tududi/uploads
+#   backups        /Users/lemonnier/docker/hawser-stacks/tududi/backups (nightly pg_dump in backups/db)
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: tududi-db
+    environment:
+      POSTGRES_DB: tududi
+      POSTGRES_USER: tududi
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the stack's environment variables}
+    volumes:
+      - tududi_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tududi -d tududi"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  tududi:
+    build: .
+    image: tududi-custom:latest
+    container_name: tududi
+    environment:
+      TUDUDI_USER_EMAIL: ${TUDUDI_USER_EMAIL:?Set TUDUDI_USER_EMAIL in the stack's environment variables}
+      TUDUDI_USER_PASSWORD: ${TUDUDI_USER_PASSWORD:?Set TUDUDI_USER_PASSWORD in the stack's environment variables}
+      TUDUDI_SESSION_SECRET: ${TUDUDI_SESSION_SECRET:?Set TUDUDI_SESSION_SECRET in the stack's environment variables}
+      DATABASE_URL: postgres://tududi:${DB_PASSWORD}@db:5432/tududi
+    ports:
+      - "3002:3002"
+    volumes:
+      - /Users/lemonnier/docker/hawser-stacks/tududi/uploads:/app/uploads
+      - /Users/lemonnier/docker/hawser-stacks/tududi/backups:/app/backups
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Nightly pg_dump, keeping 7 days. Copy backups/db off the machine now and then.
+  backup:
+    image: postgres:16-alpine
+    container_name: tududi-backup
+    environment:
+      PGHOST: db
+      PGDATABASE: tududi
+      PGUSER: tududi
+      PGPASSWORD: ${DB_PASSWORD}
+      KEEP_DAYS: 7
+    volumes:
+      - /Users/lemonnier/docker/hawser-stacks/tududi/backups/db:/backups
+    entrypoint:
+      - sh
+      - -c
+      - |
+        while true; do
+          file=/backups/tududi-$$(date -u +%Y%m%dT%H%M%SZ).sql.gz
+          pg_dump --no-owner --no-acl | gzip > "$$file.part" && mv "$$file.part" "$$file"
+          find /backups -name 'tududi-*.sql.gz' -mtime +$$KEEP_DAYS -delete
+          sleep 86400
+        done
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  # Created by the first, hand-run stack; external so a new stack name can't start an empty database.
+  tududi_pgdata:
+    external: true
+    name: tududi_tududi_pgdata
